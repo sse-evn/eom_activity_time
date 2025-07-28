@@ -74,16 +74,29 @@ bot.command('unignore', async (ctx) => {
 
 // Команда статуса: показать всех и время с последнего фото
 bot.command('status', async (ctx) => {
-  if (!isAdmin(ctx)) return;
-  const rows = await db.all('SELECT user_id, username, last_seen FROM users');
-  if (!rows.length) return ctx.reply('Нет данных о пользователях.');
-  const now = Date.now();
-  let msg = '📝 Статус активности:\n\n';
-  for (const { user_id, username, last_seen } of rows) {
-    const diff = Math.floor((now - last_seen) / 60000);
-    msg += • ID ${user_id}${username ?  (@${username})` : ''}: ${diff} мин назад\n`;
+  try {
+    if (!isAdmin(ctx)) {
+      log(`Попытка доступа к команде status из неавторизованного чата: ${ctx.chat.id}`, 'WARN');
+      return ctx.reply('Доступ запрещен');
+    }
+    
+    const rows = await dbQuery('SELECT user_id, username, last_seen, warnings FROM users');
+    if (!rows.length) return ctx.reply('Нет данных о пользователях.');
+    
+    const now = Date.now();
+    let msg = '📝 Статус активности:\n\n';
+    
+    for (const { user_id, username, last_seen, warnings } of rows) {
+      const diff = Math.floor((now - last_seen) / 60000);
+      msg += `• ID ${user_id}${username ? ` (@${username})` : ''}: ${diff} мин назад, предупреждений: ${warnings}\n`;
+    }
+    
+    await ctx.reply(msg);
+    log(`Администратор ${ctx.from.id} запросил статус`);
+  } catch (error) {
+    log(`Ошибка при выполнении команды status: ${error.message}`, 'ERROR');
+    ctx.reply('Произошла ошибка при получении статуса.');
   }
-  ctx.reply(msg);
 });
 
 // Периодическая проверка
