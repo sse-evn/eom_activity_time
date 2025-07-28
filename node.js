@@ -134,11 +134,9 @@ bot.on('photo', async (ctx) => {
         warnings = 0;
     `, [uid, username, now]);
 
-    await ctx.reply('Фото получено, спасибо!');
     log(`Пользователь ${username ? `@${username}` : uid} отправил фото`);
   } catch (error) {
     log(`Ошибка при обработке фото: ${error.message}`, 'ERROR');
-    ctx.reply('Произошла ошибка при обработке вашего фото. Пожалуйста, попробуйте позже.');
   }
 });
 
