@@ -248,17 +248,22 @@ async function startBot() {
     });
 
     // Корректное завершение работы
-    process.once('SIGINT', () => {
-      log('Остановка бота по SIGINT');
-      bot.stop('SIGINT');
-      process.exit();
-    });
+   process.once('SIGINT', async () => {
+  log('Остановка бота по SIGINT');
+  if (botStarted) {
+    await bot.stop('SIGINT');
+  }
+  process.exit();
+});
 
-    process.once('SIGTERM', () => {
-      log('Остановка бота по SIGTERM');
-      bot.stop('SIGTERM');
-      process.exit();
-    });
+process.once('SIGTERM', async () => {
+  log('Остановка бота по SIGTERM');
+  if (botStarted) {
+    await bot.stop('SIGTERM');
+  }
+  process.exit();
+});
+
   } catch (error) {
     log(`Ошибка при запуске бота: ${error.message}`, 'ERROR');
     process.exit(1);
