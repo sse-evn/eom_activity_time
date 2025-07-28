@@ -1,0 +1,10 @@
+{
+  "name": "report-tracker-bot",
+  "version": "1.1.0",
+  "dependencies": {
+    "telegraf": "^4.12.0",
+    "dotenv": "^16.0.0",
+    "sqlite": "^4.0.25",
+    "sqlite3": "^5.1.6"
+  }
+}
