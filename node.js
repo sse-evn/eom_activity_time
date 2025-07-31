@@ -4,6 +4,7 @@ const sqlite = require('sqlite');
 const sqlite3 = require('sqlite3');
 const fs = require('fs');
 const path = require('path');
+const { DateTime } = require('luxon');
 
 const logStream = fs.createWriteStream(path.join(__dirname, 'bot.log'), { flags: 'a' });
 const log = (message, level = 'INFO') => {
@@ -140,12 +141,13 @@ bot.command('admin', async (ctx) => {
     const message = `
 <b>Доступные команды администратора:</b>
 
-• /ignore [user_id] — Добавить пользователя в игнор-лист
-• /unignore [user_id] — Удалить пользователя из игнор-листа
-• /status — Показать текущую активность всех пользователей
-• /report — Отправить отчёт за текущую смену
-• /report all — Отправить отчёты за последние 10 смен
-• /report YYYY-MM-DD morning|evening — Отправить отчёт за конкретную дату и смену
+• Игнорировать пользователя (/ignore [user_id])
+• Убрать из игнора (/unignore [user_id])
+• Статус активности (/status)
+• Отчёт за смену (/report)
+• Отчёты за 10 смен (/report all)
+• Отчёт за дату (/report YYYY-MM-DD morning|evening)
+• Обнулить данные
 
 <b>Информация о сменах:</b>
 • Таймзона: Asia/Almaty (UTC+5)
@@ -154,17 +156,155 @@ bot.command('admin', async (ctx) => {
 `;
 
     await ctx.replyWithHTML(message, Markup.inlineKeyboard([
-      [Markup.button.switchToChat('Игнорировать пользователя', '/ignore '), Markup.button.switchToChat('Убрать из игнора', '/unignore ')],
-      [Markup.button.switchToChat('Статус активности', '/status')],
-      [Markup.button.switchToChat('Отчёт за смену', '/report')],
-      [Markup.button.switchToChat('Отчёты за 10 смен', '/report all')],
-      [Markup.button.switchToChat('Отчёт за дату', '/report ')],
+      [Markup.button.callback('Игнорировать', 'ignore'), Markup.button.callback('Убрать из игнора', 'unignore')],
+      [Markup.button.callback('Статус', 'status')],
+      [Markup.button.callback('Отчёт за смену', 'report')],
+      [Markup.button.callback('Отчёты за 10 смен', 'report_all')],
+      [Markup.button.callback('Отчёт за дату', 'report_date')],
       [Markup.button.callback('Обнулить данные', 'reset_data')]
     ]));
     log(`Администратор ${ctx.from.id} запросил список команд через /admin`);
   } catch (error) {
     log(`Ошибка при выполнении команды admin: ${error.message}`, 'ERROR');
     await ctx.reply('Произошла ошибка при выполнении команды.');
+  }
+});
+
+bot.action('ignore', async (ctx) => {
+  try {
+    if (!isAdmin(ctx)) {
+      log(`Попытка доступа к действию ignore из неавторизованного чата: ${ctx.chat.id}`, 'WARN');
+      return ctx.answerCbQuery('Доступ запрещен');
+    }
+    await ctx.answerCbQuery();
+    await ctx.reply('Введите user_id для добавления в игнор-лист:');
+    ctx.session = { awaiting: 'ignore' };
+  } catch (error) {
+    log(`Ошибка при обработке действия ignore: ${error.message}`, 'ERROR');
+    await ctx.reply('Произошла ошибка.');
+  }
+});
+
+bot.action('unignore', async (ctx) => {
+  try {
+    if (!isAdmin(ctx)) {
+      log(`Попытка доступа к действию unignore из неавторизованного чата: ${ctx.chat.id}`, 'WARN');
+      return ctx.answerCbQuery('Доступ запрещен');
+    }
+    await ctx.answerCbQuery();
+    await ctx.reply('Введите user_id для удаления из игнор-листа:');
+    ctx.session = { awaiting: 'unignore' };
+  } catch (error) {
+    log(`Ошибка при обработке действия unignore: ${error.message}`, 'ERROR');
+    await ctx.reply('Произошла ошибка.');
+  }
+});
+
+bot.action('status', async (ctx) => {
+  try {
+    if (!isAdmin(ctx)) {
+      log(`Попытка доступа к действию status из неавторизованного чата: ${ctx.chat.id}`, 'WARN');
+      return ctx.answerCbQuery('Доступ запрещен');
+    }
+    await ctx.answerCbQuery();
+    const rows = await dbQuery('SELECT user_id, username, last_seen, warnings FROM users');
+    if (!rows.length) return ctx.reply('Нет данных о пользователях.');
+
+    const now = Date.now();
+    let msg = '<b>📝 Статус активности:</b>\n\n';
+
+    for (const { username, last_seen, warnings } of rows) {
+      const diff = Math.floor((now - last_seen) / 60000);
+      msg += `• <code>${username ? `@${username}` : 'Без имени'}</code>\n`;
+      msg += `  🕒 ${diff} мин назад\n`;
+      msg += `  ⚠️ Предупреждений: ${warnings}\n\n`;
+    }
+
+    await ctx.replyWithHTML(msg);
+    log(`Администратор ${ctx.from.id} запросил статус через кнопку`);
+  } catch (error) {
+    log(`Ошибка при обработке действия status: ${error.message}`, 'ERROR');
+    await ctx.reply('Произошла ошибка.');
+  }
+});
+
+bot.action('report', async (ctx) => {
+  try {
+    if (!isAdmin(ctx)) {
+      log(`Попытка доступа к действию report из неавторизованного чата: ${ctx.chat.id}`, 'WARN');
+      return ctx.answerCbQuery('Доступ запрещен');
+    }
+    await ctx.answerCbQuery();
+
+    const now = DateTime.now().setZone('Asia/Almaty');
+    const hour = now.hour;
+    let shift;
+    let shiftStart, shiftEnd;
+
+    if (hour >= 7 && hour < 15) {
+      shift = 'утренняя';
+      shiftStart = now.startOf('day').set({ hour: 7 }).toMillis();
+      shiftEnd = now.startOf('day').set({ hour: 15 }).toMillis();
+    } else if (hour >= 15 && hour < 23) {
+      shift = 'вечерняя';
+      shiftStart = now.startOf('day').set({ hour: 15 }).toMillis();
+      shiftEnd = now.startOf('day').set({ hour: 23 }).toMillis();
+    } else {
+      await ctx.reply('Смена не активна (активные смены: 07:00–15:00, 15:00–23:00).');
+      return;
+    }
+
+    const rows = await dbQuery('SELECT user_id, username, last_seen, warnings FROM users');
+    if (!rows.length) return ctx.reply('Нет данных о пользователях.');
+
+    let msg = `<b>📊 Отчёт за ${shift} смену (${now.toFormat('yyyy-MM-dd')})</b>\n\n`;
+
+    for (const { username, last_seen, warnings } of rows) {
+      msg += `• <code>${username ? `@${username}` : 'Без имени'}</code>\n`;
+      if (last_seen >= shiftStart && last_seen <= shiftEnd) {
+        const diff = Math.floor((now.toMillis() - last_seen) / 60000);
+        msg += `  🕒 Последняя активность: ${diff} мин назад\n`;
+      } else {
+        msg += `  🕒 Не активен в этой смене\n`;
+      }
+      msg += `  ⚠️ Предупреждений: ${warnings}\n\n`;
+    }
+
+    await ctx.replyWithHTML(msg);
+    log(`Администратор ${ctx.from.id} запросил отчёт за текущую смену через кнопку`);
+  } catch (error) {
+    log(`Ошибка при обработке действия report: ${error.message}`, 'ERROR');
+    await ctx.reply('Произошла ошибка.');
+  }
+});
+
+bot.action('report_all', async (ctx) => {
+  try {
+    if (!isAdmin(ctx)) {
+      log(`Попытка доступа к действию report_all из неавторизованного чата: ${ctx.chat.id}`, 'WARN');
+      return ctx.answerCbQuery('Доступ запрещен');
+    }
+    await ctx.answerCbQuery();
+    await ctx.reply('Функция отчётов за последние 10 смен ещё не реализована.');
+    log(`Администратор ${ctx.from.id} запросил отчёты за 10 смен через кнопку`);
+  } catch (error) {
+    log(`Ошибка при обработке действия report_all: ${error.message}`, 'ERROR');
+    await ctx.reply('Произошла ошибка.');
+  }
+});
+
+bot.action('report_date', async (ctx) => {
+  try {
+    if (!isAdmin(ctx)) {
+      log(`Попытка доступа к действию report_date из неавторизованного чата: ${ctx.chat.id}`, 'WARN');
+      return ctx.answerCbQuery('Доступ запрещен');
+    }
+    await ctx.answerCbQuery();
+    await ctx.reply('Введите дату и смену в формате: YYYY-MM-DD morning|evening');
+    ctx.session = { awaiting: 'report_date' };
+  } catch (error) {
+    log(`Ошибка при обработке действия report_date: ${error.message}`, 'ERROR');
+    await ctx.reply('Произошла ошибка.');
   }
 });
 
@@ -184,6 +324,42 @@ bot.action('reset_data', async (ctx) => {
     log(`Ошибка при обнулении данных: ${error.message}`, 'ERROR');
     await ctx.answerCbQuery('Ошибка при обнулении данных');
     await ctx.reply('Произошла ошибка при выполнении действия.');
+  }
+});
+
+bot.on('text', async (ctx) => {
+  try {
+    if (!isAdmin(ctx) || !ctx.session?.awaiting) return;
+
+    const text = ctx.message.text.trim();
+    if (ctx.session.awaiting === 'ignore') {
+      if (!isValidUserId(text)) {
+        return ctx.reply('Укажите корректный user_id (только цифры)');
+      }
+      const uid = parseInt(text);
+      await dbQuery('INSERT OR IGNORE INTO ignore_list(user_id) VALUES (?)', [uid]);
+      await ctx.reply(`Пользователь ${uid} добавлен в ignore-лист.`);
+      log(`Пользователь ${uid} добавлен в ignore-лист администратором ${ctx.from.id}`);
+    } else if (ctx.session.awaiting === 'unignore') {
+      if (!isValidUserId(text)) {
+        return ctx.reply('Укажите корректный user_id (только цифры)');
+      }
+      const uid = parseInt(text);
+      await dbQuery('DELETE FROM ignore_list WHERE user_id = ?', [uid]);
+      await ctx.reply(`Пользователь ${uid} удалён из игнор-листа.`);
+      log(`Пользователь ${uid} удален из ignore-листа администратором ${ctx.from.id}`);
+    } else if (ctx.session.awaiting === 'report_date') {
+      if (!text.match(/^\d{4}-\d{2}-\d{2} (morning|evening)$/)) {
+        return ctx.reply('Формат должен быть: YYYY-MM-DD morning|evening');
+      }
+      await ctx.reply(`Функция отчёта за ${text} ещё не реализована.`);
+      log(`Администратор ${ctx.from.id} запросил отчёт за ${text} через кнопку`);
+    }
+    ctx.session = null;
+  } catch (error) {
+    log(`Ошибка при обработке текстового ввода: ${error.message}`, 'ERROR');
+    await ctx.reply('Произошла ошибка.');
+    ctx.session = null;
   }
 });
 
@@ -242,18 +418,69 @@ bot.command('status', async (ctx) => {
     if (!rows.length) return ctx.reply('Нет данных о пользователях.');
 
     const now = Date.now();
-    let msg = '📝 Статус активности:\n\n';
+    let msg = '<b>📝 Статус активности:</b>\n\n';
 
-    for (const { user_id, username, last_seen, warnings } of rows) {
+    for (const { username, last_seen, warnings } of rows) {
       const diff = Math.floor((now - last_seen) / 60000);
-      msg += `• ID ${user_id}${username ? ` (@${username})` : ''}: ${diff} мин назад, предупреждений: ${warnings}\n`;
+      msg += `• <code>${username ? `@${username}` : 'Без имени'}</code>\n`;
+      msg += `  🕒 ${diff} мин назад\n`;
+      msg += `  ⚠️ Предупреждений: ${warnings}\n\n`;
     }
 
-    await ctx.reply(msg);
+    await ctx.replyWithHTML(msg);
     log(`Администратор ${ctx.from.id} запросил статус`);
   } catch (error) {
     log(`Ошибка при выполнении команды status: ${error.message}`, 'ERROR');
     ctx.reply('Произошла ошибка при получении статуса.');
+  }
+});
+
+bot.command('report', async (ctx) => {
+  try {
+    if (!isAdmin(ctx)) {
+      log(`Попытка доступа к команде report из неавторизованного чата: ${ctx.chat.id}`, 'WARN');
+      return ctx.reply('Доступ запрещен');
+    }
+
+    const now = DateTime.now().setZone('Asia/Almaty');
+    const hour = now.hour;
+    let shift;
+    let shiftStart, shiftEnd;
+
+    if (hour >= 7 && hour < 15) {
+      shift = 'утренняя';
+      shiftStart = now.startOf('day').set({ hour: 7 }).toMillis();
+      shiftEnd = now.startOf('day').set({ hour: 15 }).toMillis();
+    } else if (hour >= 15 && hour < 23) {
+      shift = 'вечерняя';
+      shiftStart = now.startOf('day').set({ hour: 15 }).toMillis();
+      shiftEnd = now.startOf('day').set({ hour: 23 }).toMillis();
+    } else {
+      await ctx.reply('Смена не активна (активные смены: 07:00–15:00, 15:00–23:00).');
+      return;
+    }
+
+    const rows = await dbQuery('SELECT user_id, username, last_seen, warnings FROM users');
+    if (!rows.length) return ctx.reply('Нет данных о пользователях.');
+
+    let msg = `<b>📊 Отчёт за ${shift} смену (${now.toFormat('yyyy-MM-dd')})</b>\n\n`;
+
+    for (const { username, last_seen, warnings } of rows) {
+      msg += `• <code>${username ? `@${username}` : 'Без имени'}</code>\n`;
+      if (last_seen >= shiftStart && last_seen <= shiftEnd) {
+        const diff = Math.floor((now.toMillis() - last_seen) / 60000);
+        msg += `  🕒 Последняя активность: ${diff} мин назад\n`;
+      } else {
+        msg += `  🕒 Не активен в этой смене\n`;
+      }
+      msg += `  ⚠️ Предупреждений: ${warnings}\n\n`;
+    }
+
+    await ctx.replyWithHTML(msg);
+    log(`Администратор ${ctx.from.id} запросил отчёт за текущую смену`);
+  } catch (error) {
+    log(`Ошибка при выполнении команды report: ${error.message}`, 'ERROR');
+    ctx.reply('Произошла ошибка при получении отчёта.');
   }
 });
 
