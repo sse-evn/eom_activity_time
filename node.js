@@ -1,11 +1,10 @@
 require('dotenv').config();
-const { Telegraf } = require('telegraf');
+const { Telegraf, Markup } = require('telegraf');
 const sqlite = require('sqlite');
 const sqlite3 = require('sqlite3');
 const fs = require('fs');
 const path = require('path');
 
-// Настройка логгера
 const logStream = fs.createWriteStream(path.join(__dirname, 'bot.log'), { flags: 'a' });
 const log = (message, level = 'INFO') => {
   const timestamp = new Date().toISOString();
@@ -16,7 +15,6 @@ const log = (message, level = 'INFO') => {
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// Конфигурация
 const config = {
   ADMIN_CHAT_ID: process.env.ADMIN_CHAT_ID,
   SOURCE_CHAT_ID: process.env.SOURCE_CHAT_ID,
@@ -26,7 +24,6 @@ const config = {
   get TIMEOUT() { return this.TIMEOUT_MINUTES * 60 * 1000 }
 };
 
-// Проверка конфигурации
 if (!config.ADMIN_CHAT_ID || !config.SOURCE_CHAT_ID || !config.REPORT_CHAT_ID) {
   log('Не все обязательные переменные окружения установлены!', 'ERROR');
   process.exit(1);
@@ -34,7 +31,6 @@ if (!config.ADMIN_CHAT_ID || !config.SOURCE_CHAT_ID || !config.REPORT_CHAT_ID) {
 
 let db;
 
-// Инициализация БД
 async function initDb() {
   try {
     db = await sqlite.open({
@@ -66,7 +62,6 @@ async function initDb() {
   }
 }
 
-// Обертка для запросов к БД
 async function dbQuery(query, params = []) {
   try {
     return await db[query.startsWith('SELECT') ? 'all' : 'run'](query, params);
@@ -76,20 +71,16 @@ async function dbQuery(query, params = []) {
   }
 }
 
-// Проверка прав администратора
 function isAdmin(ctx) {
   return String(ctx.chat.id) === config.ADMIN_CHAT_ID;
 }
 
-// Валидация ID пользователя
 function isValidUserId(userId) {
   return /^\d+$/.test(userId);
 }
 
-// Обработка предупреждений
 async function handleWarning(userId, username) {
   try {
-    // Увеличиваем счетчик предупреждений
     await dbQuery(`
       UPDATE users 
       SET warnings = warnings + 1 
@@ -116,7 +107,6 @@ async function handleWarning(userId, username) {
   }
 }
 
-// Обработка фото
 bot.on('photo', async (ctx) => {
   try {
     if (String(ctx.chat.id) !== config.SOURCE_CHAT_ID) return;
@@ -140,7 +130,63 @@ bot.on('photo', async (ctx) => {
   }
 });
 
-// Команды администратора
+bot.command('admin', async (ctx) => {
+  try {
+    if (!isAdmin(ctx)) {
+      log(`Попытка доступа к команде admin из неавторизованного чата: ${ctx.chat.id}`, 'WARN');
+      return ctx.reply('Доступ запрещен');
+    }
+
+    const message = `
+<b>Доступные команды администратора:</b>
+
+• /ignore [user_id] — Добавить пользователя в игнор-лист
+• /unignore [user_id] — Удалить пользователя из игнор-листа
+• /status — Показать текущую активность всех пользователей
+• /report — Отправить отчёт за текущую смену
+• /report all — Отправить отчёты за последние 10 смен
+• /report YYYY-MM-DD morning|evening — Отправить отчёт за конкретную дату и смену
+
+<b>Информация о сменах:</b>
+• Таймзона: Asia/Almaty (UTC+5)
+• Утренняя смена: 07:00–15:00
+• Вечерняя смена: 15:00–23:00
+`;
+
+    await ctx.replyWithHTML(message, Markup.inlineKeyboard([
+      [Markup.button.switchToChat('Игнорировать пользователя', '/ignore '), Markup.button.switchToChat('Убрать из игнора', '/unignore ')],
+      [Markup.button.switchToChat('Статус активности', '/status')],
+      [Markup.button.switchToChat('Отчёт за смену', '/report')],
+      [Markup.button.switchToChat('Отчёты за 10 смен', '/report all')],
+      [Markup.button.switchToChat('Отчёт за дату', '/report ')],
+      [Markup.button.callback('Обнулить данные', 'reset_data')]
+    ]));
+    log(`Администратор ${ctx.from.id} запросил список команд через /admin`);
+  } catch (error) {
+    log(`Ошибка при выполнении команды admin: ${error.message}`, 'ERROR');
+    await ctx.reply('Произошла ошибка при выполнении команды.');
+  }
+});
+
+bot.action('reset_data', async (ctx) => {
+  try {
+    if (!isAdmin(ctx)) {
+      log(`Попытка доступа к действию reset_data из неавторизованного чата: ${ctx.chat.id}`, 'WARN');
+      return ctx.answerCbQuery('Доступ запрещен');
+    }
+
+    await dbQuery('DELETE FROM users');
+    await dbQuery('DELETE FROM ignore_list');
+    await ctx.answerCbQuery('Данные успешно обнулены');
+    await ctx.reply('Все данные пользователей и игнор-листа обнулены.');
+    log(`Администратор ${ctx.from.id} обнулил данные`);
+  } catch (error) {
+    log(`Ошибка при обнулении данных: ${error.message}`, 'ERROR');
+    await ctx.answerCbQuery('Ошибка при обнулении данных');
+    await ctx.reply('Произошла ошибка при выполнении действия.');
+  }
+});
+
 bot.command('ignore', async (ctx) => {
   try {
     if (!isAdmin(ctx)) {
@@ -177,7 +223,7 @@ bot.command('unignore', async (ctx) => {
 
     const uid = parseInt(args);
     await dbQuery('DELETE FROM ignore_list WHERE user_id = ?', [uid]);
-    await ctx.reply(`Пользователь ${uid} удалён из ignore-листа.`);
+    await ctx.reply(`Пользователь ${uid} удалён из игнор-листа.`);
     log(`Пользователь ${uid} удален из ignore-листа администратором ${ctx.from.id}`);
   } catch (error) {
     log(`Ошибка при выполнении команды unignore: ${error.message}`, 'ERROR');
@@ -185,7 +231,6 @@ bot.command('unignore', async (ctx) => {
   }
 });
 
-// Команда статуса
 bot.command('status', async (ctx) => {
   try {
     if (!isAdmin(ctx)) {
@@ -212,7 +257,6 @@ bot.command('status', async (ctx) => {
   }
 });
 
-// Периодическая проверка активности
 async function checkActivity() {
   try {
     log('Начало периодической проверки активности');
@@ -225,44 +269,37 @@ async function checkActivity() {
       if (ignoreSet.has(u.user_id)) continue;
       if (now - u.last_seen > config.TIMEOUT) {
         await handleWarning(u.user_id, u.username);
-        // Обновляем last_seen чтобы не спамить уведомлениями
         await dbQuery('UPDATE users SET last_seen = ? WHERE user_id = ?', [now, u.user_id]);
       }
     }
 
     log('Периодическая проверка активности завершена');
   } catch (error) {
-    log(`Ошибка при периодической проверке активности: ${error.message}`, 'ERROR');
+    log(`Ошибка при периодической проверки активности: ${error.message}`, 'ERROR');
   } finally {
     setTimeout(checkActivity, config.CHECK_INTERVAL);
   }
 }
 
-// Запуск бота
 async function startBot() {
   try {
     await initDb();
     bot.launch().then(() => {
       log('Бот успешно запущен');
-      checkActivity(); // Запускаем периодическую проверку
+      checkActivity();
     });
 
-    // Корректное завершение работы
-   process.once('SIGINT', async () => {
-  log('Остановка бота по SIGINT');
-  if (botStarted) {
-    await bot.stop('SIGINT');
-  }
-  process.exit();
-});
+    process.once('SIGINT', async () => {
+      log('Остановка бота по SIGINT');
+      await bot.stop('SIGINT');
+      process.exit();
+    });
 
-process.once('SIGTERM', async () => {
-  log('Остановка бота по SIGTERM');
-  if (botStarted) {
-    await bot.stop('SIGTERM');
-  }
-  process.exit();
-});
+    process.once('SIGTERM', async () => {
+      log('Остановка бота по SIGTERM');
+      await bot.stop('SIGTERM');
+      process.exit();
+    });
 
   } catch (error) {
     log(`Ошибка при запуске бота: ${error.message}`, 'ERROR');
